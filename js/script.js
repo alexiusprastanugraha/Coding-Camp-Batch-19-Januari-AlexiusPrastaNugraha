@@ -1,779 +1,367 @@
-document.addEventListener("DOMContentLoaded", () => {
-  (() => {
-    "use strict";
+class TodoApp {
+    constructor() {
+        this.tasks = JSON.parse(localStorage.getItem('tasks')) || [];
+        this.currentFilter = 'all';
+        this.sortBy = 'date'; // 'date' or 'name'
+        this.sortOrder = 'asc'; // 'asc' or 'desc'
+        this.editingId = null;  // holds id when editing
 
-    const escapeHtml = (str) => {
-      return str
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#039;");
-    };
-  })();
-  // ===== Elements
-  const form = document.getElementById("todoForm");
-  const todoText = document.getElementById("todoText");
-  const todoDate = document.getElementById("todoDate");
-  const editingId = document.getElementById("editingId");
-
-  const errText = document.getElementById("errText");
-  const errDate = document.getElementById("errDate");
-
-  const btnIcon = document.getElementById("btnIcon");
-  const btnLabel = document.getElementById("btnLabel");
-
-  const tbody = document.getElementById("todoTbody");
-
-  const searchInput = document.getElementById("searchInput");
-  const statusFilter = document.getElementById("statusFilter"); // hidden select
-  const sortBy = document.getElementById("sortBy"); // hidden select
-  const deleteAllBtn = document.getElementById("deleteAllBtn");
-
-  const statTotal = document.getElementById("statTotal");
-  const statDone = document.getElementById("statDone");
-  const statPending = document.getElementById("statPending");
-  const progressPercent = document.getElementById("progressPercent");
-
-  // ===== Dropdown (popover) elements
-  const sortBtn = document.getElementById("sortBtn");
-  const filterBtn = document.getElementById("filterBtn");
-  const sortMenu = document.getElementById("sortMenu");
-  const filterMenu = document.getElementById("filterMenu");
-
-  // ===== Storage
-  const STORAGE_KEY = "todo_manager_v1";
-
-  /** @type {{id:string, text:string, dueDate:string, completed:boolean, createdAt:number, subtasks?: {id:string,text:string,dueDate?:string,completed:boolean,createdAt:number}[]}[]} */
-  let todos = loadTodos();
-
-  // ===== Subtask UI state (expand/collapse)
-  const expanded = new Set(); // tidak disimpan
-
-  // ===== Date helpers
-  function todayISO() {
-    const now = new Date();
-    const yyyy = now.getFullYear();
-    const mm = String(now.getMonth() + 1).padStart(2, "0");
-    const dd = String(now.getDate()).padStart(2, "0");
-    return `${yyyy}-${mm}-${dd}`;
-  }
-
-  function enforceMinDate() {
-    const t = todayISO();
-    todoDate.min = t;
-    if (todoDate.value && todoDate.value < t) todoDate.value = "";
-  }
-
-  enforceMinDate();
-  setInterval(enforceMinDate, 60 * 1000);
-
-  todoDate.addEventListener("input", () => {
-    const t = todayISO();
-    if (todoDate.value && todoDate.value < t) {
-      todoDate.value = "";
-      errDate.textContent = "Tanggal tidak boleh sudah lewat.";
-    } else if (errDate.textContent === "Tanggal tidak boleh sudah lewat.") {
-      errDate.textContent = "";
+        this.initializeElements();
+        this.attachEventListeners();
+        this.setDefaultDate();
+        this.render();
     }
-  });
 
-  // ===== Dropdown behavior (SORT / FILTER)
-  function closeMenus() {
-    if (sortMenu) sortMenu.classList.add("hidden");
-    if (filterMenu) filterMenu.classList.add("hidden");
-    if (sortBtn) sortBtn.setAttribute("aria-expanded", "false");
-    if (filterBtn) filterBtn.setAttribute("aria-expanded", "false");
-  }
+    initializeElements() {
+        this.taskInput = document.getElementById('taskInput');
+        this.dateInput = document.getElementById('dateInput');
+        this.addBtn = document.getElementById('addBtn');
+        this.searchInput = document.getElementById('searchInput');
+        this.sortBtn = document.getElementById('sortBtn');
+        this.filterBtn = document.getElementById('filterBtn');
+        this.deleteAllBtn = document.getElementById('deleteAllBtn');
+        this.filterDropdown = document.getElementById('filterDropdown');
+        this.tasksTableBody = document.getElementById('tasksTableBody');
+        this.emptyState = document.getElementById('emptyState');
+        this.errorMessage = document.getElementById('errorMessage');
 
-  if (sortBtn && sortMenu) {
-    sortBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const willOpen = sortMenu.classList.contains("hidden");
-      closeMenus();
-      if (willOpen) {
-        sortMenu.classList.remove("hidden");
-        sortBtn.setAttribute("aria-expanded", "true");
-      }
-    });
+        this.totalTasksEl = document.getElementById('totalTasks');
+        this.completedTasksEl = document.getElementById('completedTasks');
+        this.pendingTasksEl = document.getElementById('pendingTasks');
+        this.progressPercentageEl = document.getElementById('progressPercentage');
+        this.progressBar = document.getElementById('progressBar');
+    }
 
-    sortMenu.addEventListener("click", (e) => {
-      const item = e.target.closest("[data-sort]");
-      if (!item) return;
-      const val = item.getAttribute("data-sort");
-      if (!val) return;
-
-      sortBy.value = val;
-      sortBy.dispatchEvent(new Event("change"));
-      closeMenus();
-    });
-  }
-
-  if (filterBtn && filterMenu) {
-    filterBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const willOpen = filterMenu.classList.contains("hidden");
-      closeMenus();
-      if (willOpen) {
-        filterMenu.classList.remove("hidden");
-        filterBtn.setAttribute("aria-expanded", "true");
-      }
-    });
-
-    filterMenu.addEventListener("click", (e) => {
-      const item = e.target.closest("[data-filter]");
-      if (!item) return;
-      const val = item.getAttribute("data-filter");
-      if (!val) return;
-
-      statusFilter.value = val;
-      statusFilter.dispatchEvent(new Event("change"));
-      closeMenus();
-    });
-  }
-
-  document.addEventListener("click", () => closeMenus());
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeMenus();
-  });
-
-  // ===== Custom Modal (Confirm + Input)
-  function openConfirm(title, message) {
-    return new Promise((resolve) => {
-      const modal = document.createElement("div");
-      modal.className = "modal";
-
-      modal.innerHTML = `
-        <div class="modalOverlay" data-close="1"></div>
-        <div class="modalCard" role="dialog" aria-modal="true">
-          <h3 class="modalTitle">${escapeHtml(title)}</h3>
-          <p class="modalMessage">${escapeHtml(message)}</p>
-          <div class="modalActions">
-            <button class="modalBtn" data-cancel="1" type="button">Cancel</button>
-            <button class="modalBtn modalBtnDanger" data-ok="1" type="button">OK</button>
-          </div>
-        </div>
-      `;
-
-      document.body.appendChild(modal);
-
-      const close = (val) => {
-        modal.remove();
-        resolve(val);
-      };
-
-      modal.addEventListener("click", (e) => {
-        if (e.target?.dataset?.close) close(false);
-        if (e.target?.dataset?.cancel) close(false);
-        if (e.target?.dataset?.ok) close(true);
-      });
-
-      document.addEventListener(
-        "keydown",
-        function escOnce(ev) {
-          if (ev.key === "Escape") {
-            document.removeEventListener("keydown", escOnce);
-            close(false);
-          }
-        },
-        { once: true }
-      );
-    });
-  }
-
-  function openTextInput(title, placeholder, defaultValue = "") {
-    return new Promise((resolve) => {
-      const modal = document.createElement("div");
-      modal.className = "modal";
-
-      modal.innerHTML = `
-        <div class="modalOverlay" data-close="1"></div>
-        <div class="modalCard" role="dialog" aria-modal="true">
-          <h3 class="modalTitle">${escapeHtml(title)}</h3>
-          <div style="margin:10px 0 14px">
-            <input id="__modalInput" class="input" type="text" placeholder="${escapeHtml(
-              placeholder
-            )}" value="${escapeHtml(defaultValue)}" />
-            <small id="__modalErr" class="error" style="min-height:14px;margin-top:8px"></small>
-          </div>
-          <div class="modalActions">
-            <button class="modalBtn" data-cancel="1" type="button">Cancel</button>
-            <button class="modalBtn modalBtnDanger" data-ok="1" type="button">OK</button>
-          </div>
-        </div>
-      `;
-
-      document.body.appendChild(modal);
-
-      const input = modal.querySelector("#__modalInput");
-      const err = modal.querySelector("#__modalErr");
-      input?.focus();
-
-      const close = (val) => {
-        modal.remove();
-        resolve(val);
-      };
-
-      const submit = () => {
-        const val = (input?.value || "").trim();
-        if (!val) {
-          err.textContent = "Wajib diisi.";
-          return;
-        }
-        close(val);
-      };
-
-      modal.addEventListener("click", (e) => {
-        if (e.target?.dataset?.close) return close(null);
-        if (e.target?.dataset?.cancel) return close(null);
-        if (e.target?.dataset?.ok) return submit();
-      });
-
-      input?.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") submit();
-        if (e.key === "Escape") close(null);
-      });
-
-      document.addEventListener(
-        "keydown",
-        function escOnce(ev) {
-          if (ev.key === "Escape") {
-            document.removeEventListener("keydown", escOnce);
-            close(null);
-          }
-        },
-        { once: true }
-      );
-    });
-  }
-
-  // ===== NEW: modal input subtask (text + date)
-  function openSubtaskInput(title = "Add Subtask", defaultText = "", defaultDate = "") {
-    return new Promise((resolve) => {
-      const modal = document.createElement("div");
-      modal.className = "modal";
-
-      const minDate = todayISO();
-
-      modal.innerHTML = `
-        <div class="modalOverlay" data-close="1"></div>
-        <div class="modalCard" role="dialog" aria-modal="true">
-          <h3 class="modalTitle">${escapeHtml(title)}</h3>
-
-          <div style="margin:10px 0 14px; display:flex; flex-direction:column; gap:10px;">
-            <div>
-              <input id="__subText" class="input" type="text" placeholder="Contoh: Beli kabel..." value="${escapeHtml(
-                defaultText
-              )}" />
-              <small id="__subErr" class="error" style="min-height:14px;margin-top:8px"></small>
-            </div>
-
-            <div>
-              <label style="display:block;font-weight:800;font-size:13px;margin-bottom:6px;color:#111827;">
-                Due Date (opsional)
-              </label>
-              <input id="__subDate" class="input" type="date" min="${minDate}" value="${escapeHtml(
-                defaultDate
-              )}" />
-              <small id="__subErrDate" class="error" style="min-height:14px;margin-top:8px"></small>
-            </div>
-          </div>
-
-          <div class="modalActions">
-            <button class="modalBtn" data-cancel="1" type="button">Cancel</button>
-            <button class="modalBtn modalBtnDanger" data-ok="1" type="button">OK</button>
-          </div>
-        </div>
-      `;
-
-      document.body.appendChild(modal);
-
-      const textEl = modal.querySelector("#__subText");
-      const dateEl = modal.querySelector("#__subDate");
-      const errEl = modal.querySelector("#__subErr");
-      const errDateEl = modal.querySelector("#__subErrDate");
-
-      textEl?.focus();
-
-      const close = (val) => {
-        modal.remove();
-        resolve(val);
-      };
-
-      const submit = () => {
-        const text = (textEl?.value || "").trim();
-        const dueDate = (dateEl?.value || "").trim();
-
-        errEl.textContent = "";
-        errDateEl.textContent = "";
-
-        if (!text) {
-          errEl.textContent = "Wajib diisi.";
-          return;
-        }
-        if (dueDate && dueDate < minDate) {
-          errDateEl.textContent = "Tanggal tidak boleh sudah lewat.";
-          return;
-        }
-
-        close({ text, dueDate });
-      };
-
-      modal.addEventListener("click", (e) => {
-        if (e.target?.dataset?.close) return close(null);
-        if (e.target?.dataset?.cancel) return close(null);
-        if (e.target?.dataset?.ok) return submit();
-      });
-
-      [textEl, dateEl].forEach((el) => {
-        el?.addEventListener("keydown", (e) => {
-          if (e.key === "Enter") submit();
-          if (e.key === "Escape") close(null);
+    attachEventListeners() {
+        this.addBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            this.addTask();
         });
-      });
 
-      document.addEventListener(
-        "keydown",
-        function escOnce(ev) {
-          if (ev.key === "Escape") {
-            document.removeEventListener("keydown", escOnce);
-            close(null);
-          }
-        },
-        { once: true }
-      );
-    });
-  }
+        this.taskInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') this.addTask();
+        });
 
-  // ===== Parent/Subtask Sync (subtask jalan sendiri)
-  // RULE:
-  // - Subtask toggle -> parent auto completed kalau SEMUA subtask completed
-  // - Kalau ada subtask pending -> parent jadi pending
-    function syncParentCompletion(todo) {
-    if (!Array.isArray(todo.subtasks) || todo.subtasks.length === 0) return;
-    todo.completed = todo.subtasks.every((s) => s.completed);
-}
+        this.dateInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') this.addTask();
+        });
 
+        this.searchInput.addEventListener('input', () => this.render());
 
-  // ===== Init render
-  render();
+        this.sortBtn.addEventListener('click', () => this.toggleSort());
+        this.filterBtn.addEventListener('click', () => this.toggleFilterDropdown());
+        this.deleteAllBtn.addEventListener('click', () => this.deleteAllTasks());
 
-  // ===== Events
-  form.addEventListener("submit", (e) => {
-    e.preventDefault();
+        document.querySelectorAll('.filter-option').forEach(btn => {
+            btn.addEventListener('click', (e) => this.setFilter(e.currentTarget.dataset.filter));
+        });
 
-    const text = todoText.value.trim();
-    const date = todoDate.value;
-
-    if (!validateForm(text, date)) return;
-
-    const isEditing = Boolean(editingId.value);
-
-    if (isEditing) {
-      const id = editingId.value;
-      const idx = todos.findIndex((t) => t.id === id);
-      if (idx !== -1) {
-        todos[idx].text = text;
-        todos[idx].dueDate = date;
-      }
-      exitEditMode();
-    } else {
-      const newTodo = {
-        id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now())),
-        text,
-        dueDate: date,
-        completed: false,
-        createdAt: Date.now(),
-        subtasks: [],
-      };
-      todos.unshift(newTodo);
+        // global keyboard for search focus (Ctrl+F)
+        document.addEventListener('keydown', (e) => {
+            if (e.ctrlKey && e.key === 'f') {
+                e.preventDefault();
+                this.searchInput.focus();
+            }
+            // ESC to cancel editing
+            if (e.key === 'Escape' && this.editingId) {
+                this.cancelEditing();
+            }
+        });
     }
 
-    saveTodos();
-    form.reset();
-    clearErrors();
-    enforceMinDate();
-    render();
-  });
-
-  searchInput.addEventListener("input", render);
-  statusFilter.addEventListener("change", render);
-  sortBy.addEventListener("change", render);
-
-  deleteAllBtn.addEventListener("click", async () => {
-    if (todos.length === 0) return;
-    const ok = await openConfirm("Konfirmasi", "Yakin mau hapus semua task?");
-    if (!ok) return;
-
-    todos = [];
-    saveTodos();
-    exitEditMode();
-    render();
-  });
-
-  // ===== Functions
-  function validateForm(text, date) {
-    clearErrors();
-    let valid = true;
-
-    if (!text) {
-      errText.textContent = "Wajib diisi.";
-      valid = false;
+    setDefaultDate() {
+        // set date input default to today
+        const today = new Date().toISOString().split('T')[0];
+        if (!this.dateInput.value) this.dateInput.value = today;
     }
 
-    if (!date) {
-      errDate.textContent = "Due Date wajib diisi.";
-      valid = false;
-    } else {
-      const t = todayISO();
-      if (date < t) {
-        errDate.textContent = "Tanggal tidak boleh sudah lewat.";
-        valid = false;
-      }
+    validateInput() {
+        const taskText = this.taskInput.value.trim();
+        const dueDate = this.dateInput.value;
+
+        if (!taskText) {
+            this.showError('Please enter a task name');
+            return false;
+        }
+
+        if (taskText.length > 100) {
+            this.showError('Task name cannot exceed 100 characters');
+            return false;
+        }
+
+        if (!dueDate) {
+            this.showError('Please select a due date');
+            return false;
+        }
+
+        const selectedDate = new Date(dueDate + 'T00:00:00');
+        const today = new Date(new Date().toISOString().split('T')[0] + 'T00:00:00');
+
+        if (selectedDate < today) {
+            this.showError('Due date cannot be in the past');
+            return false;
+        }
+
+        return true;
     }
 
-    return valid;
-  }
-
-  function clearErrors() {
-    errText.textContent = "";
-    errDate.textContent = "";
-  }
-
-  function enterEditMode(todo) {
-    editingId.value = todo.id;
-    todoText.value = todo.text;
-    todoDate.value = todo.dueDate;
-
-    btnIcon.textContent = "✎";
-    btnLabel.textContent = "Update";
-    todoText.focus();
-
-    enforceMinDate();
-  }
-
-  function exitEditMode() {
-    editingId.value = "";
-    btnIcon.textContent = "＋";
-    btnLabel.textContent = "Add";
-  }
-
-  // ===== Parent toggle (TIDAK mengubah subtask)
-    function toggleComplete(id) {
-    const t = todos.find((x) => x.id === id);
-    if (!t) return;
-
-    // boleh toggle manual apakah ada subtask atau tidak
-    t.completed = !t.completed;
-
-    saveTodos();
-    render();
-}
-
-
-  // ===== Subtasks
-   async function addSubtask(parentId) {
-    const parent = todos.find((x) => x.id === parentId);
-    if (!parent) return;
-
-    const result = await openSubtaskInput("Add Subtask");
-    if (!result) return;
-
-    if (!Array.isArray(parent.subtasks)) parent.subtasks = [];
-
-    parent.subtasks.push({
-        id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now())),
-        text: result.text,
-        dueDate: result.dueDate || "",
-        completed: false,
-        createdAt: Date.now(),
-    });
-
-    // karena ada subtask pending baru, parent pasti pending
-    parent.completed = false;
-
-    expanded.add(parentId);
-    saveTodos();
-    render();
-}
-
-
-  function toggleSubComplete(parentId, subId) {
-    const parent = todos.find((x) => x.id === parentId);
-    if (!parent || !Array.isArray(parent.subtasks)) return;
-
-    const s = parent.subtasks.find((x) => x.id === subId);
-    if (!s) return;
-
-    s.completed = !s.completed;
-
-    saveTodos();
-    render();
-  }
-
-  async function editSubtask(parentId, subId) {
-    const parent = todos.find((x) => x.id === parentId);
-    if (!parent || !Array.isArray(parent.subtasks)) return;
-
-    const s = parent.subtasks.find((x) => x.id === subId);
-    if (!s) return;
-
-    const result = await openSubtaskInput("Edit Subtask", s.text, s.dueDate || "");
-    if (!result) return;
-
-    s.text = result.text;
-    s.dueDate = result.dueDate || "";
-
-    saveTodos();
-    render();
-  }
-
-  async function deleteSubtask(parentId, subId) {
-    const parent = todos.find((x) => x.id === parentId);
-    if (!parent || !Array.isArray(parent.subtasks)) return;
-
-    const s = parent.subtasks.find((x) => x.id === subId);
-    if (!s) return;
-
-    const ok = await openConfirm("Konfirmasi", `Apakah yakin ingin hapus subtask "${s.text}"?`);
-    if (!ok) return;
-
-    parent.subtasks = parent.subtasks.filter((x) => x.id !== subId);
-
-    if (!parent.subtasks.length) expanded.delete(parentId);
-
-    saveTodos();
-    render();
-  }
-
-  async function deleteOne(id) {
-    const t = todos.find((x) => x.id === id);
-    if (!t) return;
-
-    const ok = await openConfirm("Konfirmasi", `Apakah yakin ingin hapus task "${t.text}"?`);
-    if (!ok) return;
-
-    todos = todos.filter((x) => x.id !== id);
-    saveTodos();
-
-    if (editingId.value === id) exitEditMode();
-    expanded.delete(id);
-    render();
-  }
-
-  function getFilteredTodos() {
-    const q = searchInput.value.trim().toLowerCase();
-    const status = statusFilter.value;
-
-    let list = [...todos];
-
-    if (q) {
-      list = list.filter((t) => t.text.toLowerCase().includes(q) || t.dueDate.includes(q));
+    showError(message) {
+        this.errorMessage.textContent = message;
+        this.errorMessage.classList.add('show');
+        clearTimeout(this._errorTimeout);
+        this._errorTimeout = setTimeout(() => {
+            this.errorMessage.classList.remove('show');
+        }, 3000);
     }
 
-    if (status === "pending") list = list.filter((t) => !t.completed);
-    if (status === "completed") list = list.filter((t) => t.completed);
+    addTask() {
+        // If editing, update existing; otherwise create new
+        if (!this.validateInput()) return;
 
-    const sort = sortBy.value;
-    if (sort === "newest") list.sort((a, b) => b.createdAt - a.createdAt);
-    if (sort === "oldest") list.sort((a, b) => a.createdAt - b.createdAt);
-    if (sort === "duedateAsc") list.sort((a, b) => a.dueDate.localeCompare(b.dueDate));
-    if (sort === "duedateDesc") list.sort((a, b) => b.dueDate.localeCompare(a.dueDate));
-    if (sort === "az") list.sort((a, b) => a.text.localeCompare(b.text, undefined, { sensitivity: "base" }));
-    if (sort === "za") list.sort((a, b) => b.text.localeCompare(a.text, undefined, { sensitivity: "base" }));
+        const name = this.taskInput.value.trim();
+        const dueDate = this.dateInput.value;
 
-    return list;
-  }
+        if (this.editingId) {
+            const task = this.tasks.find(t => t.id === this.editingId);
+            if (task) {
+                task.name = name;
+                task.dueDate = dueDate;
+                this.saveTasks();
+                this.stopEditingUI();
+                this.render();
+                this.taskInput.value = '';
+                this.setDefaultDate();
+            } else {
+                // fallback: if no task found, clear editing
+                this.stopEditingUI();
+            }
+            return;
+        }
 
-  function render() {
-    // stats: hitung parent + subtasks
-    let total = 0;
-    let done = 0;
+        const task = {
+            id: Date.now().toString(),
+            name,
+            dueDate,
+            completed: false,
+            createdAt: new Date().toISOString()
+        };
 
-    todos.forEach((t) => {
-      total += 1;
-      if (t.completed) done += 1;
+        this.tasks.push(task);
+        this.saveTasks();
 
-      if (Array.isArray(t.subtasks)) {
-        total += t.subtasks.length;
-        done += t.subtasks.filter((s) => s.completed).length;
-      }
-    });
-
-    const pending = total - done;
-
-    statTotal.textContent = String(total);
-    statDone.textContent = String(done);
-    statPending.textContent = String(pending);
-
-    if (progressPercent) {
-      const progress = total === 0 ? 0 : Math.round((done / total) * 100);
-      progressPercent.textContent = String(progress);
+        this.taskInput.value = '';
+        this.setDefaultDate();
+        this.render();
     }
 
-    const list = getFilteredTodos();
-
-    if (list.length === 0) {
-      tbody.innerHTML = `
-        <tr class="emptyRow">
-          <td colspan="5">No task found</td>
-        </tr>
-      `;
-      return;
+    deleteTask(id) {
+        this.tasks = this.tasks.filter(task => task.id !== id);
+        // if we were editing this task, cancel edit
+        if (this.editingId === id) this.cancelEditing();
+        this.saveTasks();
+        this.render();
     }
 
-    tbody.innerHTML = "";
+    toggleTaskStatus(id) {
+        const task = this.tasks.find(task => task.id === id);
+        if (task) {
+            task.completed = !task.completed;
+            this.saveTasks();
+            this.render();
+        }
+    }
 
-    list.forEach((t, i) => {
-      if (!Array.isArray(t.subtasks)) t.subtasks = [];
+    // Edit: populate form with task values so user can edit using main form
+    editTask(id) {
+        const task = this.tasks.find(task => task.id === id);
+        if (!task) return;
+        this.editingId = id;
+        this.taskInput.value = task.name;
+        this.dateInput.value = task.dueDate;
+        this.addBtn.classList.add('editing');
+        this.addBtn.textContent = 'Simpan';
+        this.taskInput.classList.add('editing');
+        this.taskInput.focus();
+    }
 
-      const tr = document.createElement("tr");
+    cancelEditing() {
+        this.editingId = null;
+        this.stopEditingUI();
+        this.taskInput.value = '';
+        this.setDefaultDate();
+    }
 
-      const statusBadge = t.completed
-        ? `<span class="badge completed">● Completed</span>`
-        : `<span class="badge pending">● Pending</span>`;
+    stopEditingUI() {
+        this.addBtn.classList.remove('editing');
+        this.addBtn.textContent = '+';
+        this.taskInput.classList.remove('editing');
+    }
 
-      const hasSubs = t.subtasks.length > 0;
-      const isOpen = expanded.has(t.id);
+    deleteAllTasks() {
+        if (this.tasks.length === 0) {
+            this.showError('No tasks to delete');
+            return;
+        }
 
-      tr.innerHTML = `
-        <td>${i + 1}</td>
-        <td>
-          <div style="display:flex; align-items:center; gap:10px;">
-            ${
-              hasSubs
-                ? `<button class="actionBtn toggleSub" type="button" style="height:28px;padding:0 8px;">
-                    ${isOpen ? "▾" : "▸"}
-                   </button>`
-                : ``
+        if (confirm('Are you sure you want to delete all tasks? This action cannot be undone.')) {
+            this.tasks = [];
+            this.saveTasks();
+            this.stopEditingUI();
+            this.render();
+        }
+    }
+
+    toggleSort() {
+        if (this.sortBy === 'date') {
+            this.sortBy = 'name';
+        } else {
+            this.sortBy = 'date';
+        }
+        this.sortOrder = this.sortOrder === 'asc' ? 'desc' : 'asc';
+        this.render();
+    }
+
+    toggleFilterDropdown() {
+        this.filterDropdown.classList.toggle('hidden');
+    }
+
+    setFilter(filter) {
+        this.currentFilter = filter;
+        document.querySelectorAll('.filter-option').forEach(btn => {
+            btn.classList.remove('active');
+        });
+        const el = document.querySelector(`[data-filter="${filter}"]`);
+        if (el) el.classList.add('active');
+        this.filterDropdown.classList.add('hidden');
+        this.render();
+    }
+
+    getFilteredAndSortedTasks() {
+        let filteredTasks = [...this.tasks];
+
+        // Filter by status
+        if (this.currentFilter === 'completed') {
+            filteredTasks = filteredTasks.filter(task => task.completed);
+        } else if (this.currentFilter === 'pending') {
+            filteredTasks = filteredTasks.filter(task => !task.completed);
+        }
+
+        // Filter by search term
+        const searchTerm = this.searchInput.value.toLowerCase();
+        if (searchTerm) {
+            filteredTasks = filteredTasks.filter(task =>
+                task.name.toLowerCase().includes(searchTerm)
+            );
+        }
+
+        // Sort
+        filteredTasks.sort((a, b) => {
+            let compareValue = 0;
+
+            if (this.sortBy === 'date') {
+                compareValue = new Date(a.dueDate) - new Date(b.dueDate);
+            } else {
+                compareValue = a.name.localeCompare(b.name);
             }
 
-            <div style="font-weight:900; ${t.completed ? "text-decoration:line-through; color:#64748b;" : ""}">
-              ${escapeHtml(t.text)}
-              ${
-                hasSubs
-                  ? `<span style="margin-left:8px;font-size:12px;font-weight:900;color:#0f172a;background:#e2e8f0;padding:2px 8px;border-radius:999px;">
-                      ${t.subtasks.length}
-                    </span>`
-                  : ``
-              }
-            </div>
-          </div>
-        </td>
-
-        <td>${formatDate(t.dueDate)}</td>
-        <td>${statusBadge}</td>
-        <td>
-          <div class="actions">
-            <button class="actionBtn subtask" type="button" title="Add Subtask">＋</button>
-            <button class="actionBtn complete" type="button">${t.completed ? "Undo" : "Complete"}</button>
-            <button class="actionBtn edit" type="button">Edit</button>
-            <button class="actionBtn delete" type="button">Delete</button>
-          </div>
-        </td>
-      `;
-
-      const btnToggle = tr.querySelector(".toggleSub");
-      const btnSub = tr.querySelector(".actionBtn.subtask");
-      const btnComplete = tr.querySelector(".actionBtn.complete");
-      const btnEdit = tr.querySelector(".actionBtn.edit");
-      const btnDelete = tr.querySelector(".actionBtn.delete");
-
-      if (btnToggle) {
-        btnToggle.addEventListener("click", () => {
-          if (expanded.has(t.id)) expanded.delete(t.id);
-          else expanded.add(t.id);
-          render();
+            return this.sortOrder === 'asc' ? compareValue : -compareValue;
         });
-      }
 
-      btnSub.addEventListener("click", () => addSubtask(t.id));
-      btnComplete.addEventListener("click", () => toggleComplete(t.id));
-      btnEdit.addEventListener("click", () => enterEditMode(t));
-      btnDelete.addEventListener("click", () => deleteOne(t.id));
-
-      tbody.appendChild(tr);
-
-      // subtasks (kalau open)
-      if (hasSubs && expanded.has(t.id)) {
-        t.subtasks.forEach((s) => {
-          const subTr = document.createElement("tr");
-          subTr.className = "subRow";
-
-          const subStatus = s.completed
-            ? `<span class="badge completed">● Completed</span>`
-            : `<span class="badge pending">● Pending</span>`;
-
-          const dueText = s.dueDate ? formatDate(s.dueDate) : "No due date";
-
-          subTr.innerHTML = `
-            <td></td>
-            <td class="subTaskText">
-              <span class="subTag"><span class="subDot"></span>${escapeHtml(s.text)}</span>
-            </td>
-            <td>${dueText}</td>
-            <td>${subStatus}</td>
-            <td>
-              <div class="actions">
-                <button class="actionBtn complete" type="button">${s.completed ? "Undo" : "Complete"}</button>
-                <button class="actionBtn edit" type="button">Edit</button>
-                <button class="actionBtn delete" type="button">Delete</button>
-              </div>
-            </td>
-          `;
-
-          const [bComplete, bEdit, bDelete] = subTr.querySelectorAll("button");
-          bComplete.addEventListener("click", () => toggleSubComplete(t.id, s.id));
-          bEdit.addEventListener("click", () => editSubtask(t.id, s.id));
-          bDelete.addEventListener("click", () => deleteSubtask(t.id, s.id));
-
-          tbody.appendChild(subTr);
-        });
-      }
-    });
-  }
-
-  function formatDate(yyyyMmDd) {
-    const [y, m, d] = (yyyyMmDd || "").split("-");
-    if (!y || !m || !d) return yyyyMmDd || "";
-    return `${d}/${m}/${y}`;
-  }
-
-  function escapeHtml(str) {
-    return String(str)
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;")
-      .replaceAll("'", "&#039;");
-  }
-
-  function loadTodos() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return [];
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return [];
-
-      return parsed
-        .filter(
-          (x) =>
-            x &&
-            typeof x.id === "string" &&
-            typeof x.text === "string" &&
-            typeof x.dueDate === "string" &&
-            typeof x.completed === "boolean"
-        )
-        .map((x) => ({
-          ...x,
-          subtasks: Array.isArray(x.subtasks) ? x.subtasks : [],
-        }));
-    } catch {
-      return [];
+        return filteredTasks;
     }
-  }
 
-  function saveTodos() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(todos));
-  }
-})();
+    updateStats() {
+        const total = this.tasks.length;
+        const completed = this.tasks.filter(task => task.completed).length;
+        const pending = total - completed;
+        const progress = total === 0 ? 0 : Math.round((completed / total) * 100);
+
+        this.totalTasksEl.textContent = total;
+        this.completedTasksEl.textContent = completed;
+        this.pendingTasksEl.textContent = pending;
+        this.progressPercentageEl.textContent = progress + '%';
+        this.progressBar.style.width = progress + '%';
+    }
+
+    formatDate(dateString) {
+        const date = new Date(dateString + 'T00:00:00');
+        const today = new Date();
+        const tomorrow = new Date(today);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+
+        if (date.toDateString() === today.toDateString()) {
+            return 'Today';
+        } else if (date.toDateString() === tomorrow.toDateString()) {
+            return 'Tomorrow';
+        }
+
+        return date.toLocaleDateString('en-US', {
+            year: '2-digit',
+            month: '2-digit',
+            day: '2-digit'
+        });
+    }
+
+    render() {
+        this.updateStats();
+
+        const filteredTasks = this.getFilteredAndSortedTasks();
+
+        // Clear table body
+        this.tasksTableBody.innerHTML = '';
+
+        if (filteredTasks.length === 0) {
+            this.emptyState.classList.add('show');
+        } else {
+            this.emptyState.classList.remove('show');
+            filteredTasks.forEach(task => {
+                this.tasksTableBody.appendChild(this.createTaskRow(task));
+            });
+        }
+    }
+
+    createTaskRow(task) {
+        const tr = document.createElement('tr');
+
+        const taskNameClass = task.completed ? 'task-name completed' : 'task-name';
+        const statusClass = task.completed ? 'status-badge completed' : 'status-badge pending';
+        const statusText = task.completed ? 'Completed' : 'Pending';
+
+        tr.innerHTML = `
+            <td class="${taskNameClass}">${this.escapeHtml(task.name)}</td>
+            <td class="task-date">${this.formatDate(task.dueDate)}</td>
+            <td><span class="${statusClass}">${statusText}</span></td>
+            <td>
+                <div class="actions">
+                    <button class="action-btn toggle-btn" title="Toggle Status">✓</button>
+                    <button class="action-btn edit-btn" title="Edit Task">✏</button>
+                    <button class="action-btn delete-btn" title="Delete Task">🗑</button>
+                </div>
+            </td>
+        `;
+
+        // Add event listeners to action buttons
+        tr.querySelector('.toggle-btn').addEventListener('click', () => this.toggleTaskStatus(task.id));
+        tr.querySelector('.edit-btn').addEventListener('click', () => this.editTask(task.id));
+        tr.querySelector('.delete-btn').addEventListener('click', () => {
+            if (confirm('Delete this task?')) this.deleteTask(task.id);
+        });
+
+        return tr;
+    }
+
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    saveTasks() {
+        localStorage.setItem('tasks', JSON.stringify(this.tasks));
+    }
+}
+
+// Initialize app when DOM is ready
+document.addEventListener('DOMContentLoaded', () => {
+    new TodoApp();
+});
